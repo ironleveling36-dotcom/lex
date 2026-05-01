@@ -60,8 +60,9 @@ WICKET_ANIMATION = [
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 log = logging.getLogger(__name__)
 
-# ---------- API ----------
+# ========== API ==========
 def fetch_match(key):
+    """Fetch match data from CREX API"""
     try:
         r = requests.get(BASE_URL.format(key), headers=HEADERS, timeout=10)
         if r.status_code == 200:
@@ -72,9 +73,12 @@ def fetch_match(key):
         log.error(f"Fetch error: {e}")
         return None
 
-# ---------- BALL DETECTION ----------
+# ========== BALL DETECTION ==========
 def extract_balls_from_over(over_string):
-    """Extract ['0', '5', '1', '1', '0', '6'] from '4:0.5.1.1.0.6'"""
+    """
+    Extract balls from over string
+    Example: '4:0.5.1.1.0.6' → ['0', '5', '1', '1', '0', '6']
+    """
     if not over_string or ":" not in over_string:
         return []
     try:
@@ -84,7 +88,10 @@ def extract_balls_from_over(over_string):
         return []
 
 def find_new_events(prev_balls, curr_balls):
-    """Compare two ball lists and find NEW 4/6/W events."""
+    """
+    Compare two ball lists and find NEW 4/6/W events
+    Returns: [('4', '🎯 FOUR!'), ('6', '🚀 SIXER!'), ('W', '💔 WICKET!')]
+    """
     if not curr_balls:
         return []
     
@@ -108,14 +115,16 @@ def find_new_events(prev_balls, curr_balls):
     
     return events
 
-# ---------- FORMATTER ----------
+# ========== FORMATTER ==========
 def parse_balls(over_str):
+    """Format over string for display"""
     if not over_str or ":" not in over_str:
         return ""
     ov, balls = over_str.split(":", 1)
     return f"Ov {ov}: " + " • ".join(balls.split("."))
 
 def format_score(d, key):
+    """Format complete match score message"""
     if not d:
         return f"⚠️ *No data for key `{key}`*\n\nMatch may be over or key expired."
 
@@ -167,9 +176,9 @@ def format_score(d, key):
     text += f"\n\n🔄 *Auto-refresh: ON*  |  🔑 `{key}`"
     return text
 
-# ---------- ANIMATIONS ----------
+# ========== ANIMATIONS ==========
 async def play_animation(app, chat_id, frames, delay=0.3):
-    """Play animation in background."""
+    """Play animation in background without blocking"""
     try:
         msg = await app.bot.send_message(chat_id, frames[0], parse_mode="Markdown")
         for frame in frames[1:]:
@@ -190,9 +199,12 @@ async def play_animation(app, chat_id, frames, delay=0.3):
     except Exception as e:
         log.error(f"Animation error: {e}")
 
-# ---------- AUTO REFRESH LOOP ----------
+# ========== AUTO REFRESH LOOP ==========
 async def auto_refresh_loop(app):
-    """Main loop that refreshes ALL subscriptions every 1.5s"""
+    """
+    Main loop that refreshes ALL subscriptions every 1.5s
+    Runs in background continuously
+    """
     await asyncio.sleep(2)  # Wait for bot to start
     
     while True:
@@ -216,7 +228,7 @@ async def auto_refresh_loop(app):
             log.error(f"Auto-refresh loop error: {e}")
 
 async def process_subscription(app, chat_id, key, sub):
-    """Process a single subscription."""
+    """Process a single subscription - update score & detect events"""
     msg_id = sub.get("msg_id")
     prev_balls = sub.get("last_balls", [])
     
@@ -285,6 +297,7 @@ async def process_subscription(app, chat_id, key, sub):
             # Message deleted, remove subscription
             if chat_id in SUBSCRIPTIONS and key in SUBSCRIPTIONS[chat_id]:
                 del SUBSCRIPTIONS[chat_id][key]
+                log.info(f"Removed subscription: message deleted for {key} in {chat_id}")
     
     # Stop if match ended
     if data.get("ms") in (4, 5):
@@ -297,9 +310,11 @@ async def process_subscription(app, chat_id, key, sub):
                 f"💥 Total Sixes: *{six_total}*",
                 parse_mode="Markdown"
             )
+            log.info(f"Match ended: {key} - Total sixes: {six_total}")
 
-# ---------- HANDLERS ----------
+# ========== HANDLERS ==========
 def main_menu():
+    """Generate main menu keyboard"""
     kb = [[InlineKeyboardButton(name, callback_data=f"k:{k}")] for k, name in MATCH_KEYS.items()]
     kb.append([
         InlineKeyboardButton("➕ Add Match", callback_data="help"),
@@ -308,6 +323,7 @@ def main_menu():
     return InlineKeyboardMarkup(kb)
 
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Start command"""
     await update.message.reply_text(
         "🏏 *Live Cricket Score Bot*\n\n"
         "⚡ Real-time updates every 1.5s\n"
@@ -318,6 +334,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 async def show_match(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Show match details"""
     q = update.callback_query
     await q.answer("⚡ Loading...")
     
@@ -340,7 +357,7 @@ async def show_match(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         log.error(f"show_match: {e}")
 
 async def start_auto(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Start auto-refresh for this match."""
+    """Start auto-refresh for this match"""
     q = update.callback_query
     key = q.data.split(":", 1)[1]
     chat_id = q.message.chat_id
@@ -377,7 +394,7 @@ async def start_auto(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         log.error(f"start_auto edit: {e}")
 
 async def stop_auto(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Stop auto-refresh."""
+    """Stop auto-refresh"""
     q = update.callback_query
     key = q.data.split(":", 1)[1]
     chat_id = q.message.chat_id
@@ -394,6 +411,7 @@ async def stop_auto(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await q.edit_message_reply_markup(reply_markup=main_menu())
 
 async def back(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Back to main menu"""
     q = update.callback_query
     await q.answer()
     await q.edit_message_text(
@@ -402,6 +420,7 @@ async def back(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 async def help_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Help - How to add matches"""
     q = update.callback_query
     await q.answer()
     await q.edit_message_text(
@@ -409,8 +428,9 @@ async def help_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "1. Go to [crex.com](https://crex.com)\n"
         "2. Open F12 → Network tab\n"
         "3. Filter: `getSV3`\n"
-        "4. Copy the `key` value\n\n"
-        "Then: `/add <key> <name>`\n\n"
+        "4. Copy the `key` value from URL\n\n"
+        "Then send:\n"
+        "`/add <key> <name>`\n\n"
         "_Example:_\n"
         "`/add 118N IND vs AUS`",
         parse_mode="Markdown", disable_web_page_preview=True,
@@ -418,6 +438,7 @@ async def help_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 async def about(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """About bot"""
     q = update.callback_query
     await q.answer()
     await q.edit_message_text(
@@ -426,13 +447,15 @@ async def about(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "• ⚡ 1.5s auto-refresh\n"
         "• 💥 4/6 animations\n"
         "• 🎉 Six milestones\n"
-        "• 📊 Live CRR\n"
-        "• 🚀 Railway hosted",
+        "• 📊 Live CRR tracking\n"
+        "• 🚀 Railway hosted\n\n"
+        "_Data via CREX API_",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="back")]])
     )
 
 async def add_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Add new match"""
     if len(ctx.args) < 2:
         await update.message.reply_text("Usage: `/add <key> <name>`", parse_mode="Markdown")
         return
@@ -440,21 +463,26 @@ async def add_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     name = " ".join(ctx.args[1:])
     MATCH_KEYS[key] = name
     await update.message.reply_text(f"✅ Added: *{name}* (`{key}`)", parse_mode="Markdown")
+    log.info(f"Added match: {key} - {name}")
 
 async def remove_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Remove match"""
     if not ctx.args:
         await update.message.reply_text("Usage: `/remove <key>`", parse_mode="Markdown")
         return
     key = ctx.args[0]
     if key in MATCH_KEYS:
+        name = MATCH_KEYS[key]
         del MATCH_KEYS[key]
-        await update.message.reply_text(f"🗑 Removed `{key}`", parse_mode="Markdown")
+        await update.message.reply_text(f"🗑 Removed: *{name}*", parse_mode="Markdown")
+        log.info(f"Removed match: {key}")
     else:
         await update.message.reply_text("❌ Key not found")
 
 async def score_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Get score by key"""
     if not ctx.args:
-        await update.message.reply_text("Usage: `/score <key>`", parse_mode="Markdown")
+        await update.message.reply_text("Usage: `/score <key>`\n\nExample: `/score 118N`", parse_mode="Markdown")
         return
     key = ctx.args[0]
     data = fetch_match(key)
@@ -463,15 +491,18 @@ async def score_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                                      reply_markup=InlineKeyboardMarkup(kb))
 
 async def list_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """List all matches"""
     if not MATCH_KEYS:
-        await update.message.reply_text("No matches. Use `/add`")
+        await update.message.reply_text("No matches added. Use `/add`")
         return
-    text = "📋 *Matches:*\n\n" + "\n".join(f"• `{k}` — {v}" for k, v in MATCH_KEYS.items())
+    text = "📋 *Saved Matches:*\n\n" + "\n".join(f"• `{k}` — {v}" for k, v in MATCH_KEYS.items())
     await update.message.reply_text(text, parse_mode="Markdown")
 
+# ========== MAIN ==========
 def main():
+    """Initialize and run bot"""
     if not BOT_TOKEN:
-        raise RuntimeError("BOT_TOKEN not set!")
+        raise RuntimeError("BOT_TOKEN environment variable not set!")
     
     app = Application.builder().token(BOT_TOKEN).build()
     
@@ -482,7 +513,7 @@ def main():
     app.add_handler(CommandHandler("score", score_cmd))
     app.add_handler(CommandHandler("list", list_cmd))
     
-    # Callbacks
+    # Button callbacks
     app.add_handler(CallbackQueryHandler(show_match, pattern="^k:"))
     app.add_handler(CallbackQueryHandler(start_auto, pattern="^start:"))
     app.add_handler(CallbackQueryHandler(stop_auto, pattern="^stop:"))
@@ -491,7 +522,11 @@ def main():
     app.add_handler(CallbackQueryHandler(about, pattern="^about$"))
     
     # Start auto-refresh background loop
-    app.post_init = lambda: asyncio.create_task(auto_refresh_loop(app))
+    async def post_init_handler(app_instance):
+        """Called when bot starts"""
+        asyncio.create_task(auto_refresh_loop(app_instance))
+    
+    app.post_init = post_init_handler
     
     log.info("✅ Bot started with auto-refresh loop")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
