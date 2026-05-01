@@ -31,6 +31,7 @@ STATUS_MAP = {
     5: "🏁 Result"
 }
 
+# Active subscriptions: {chat_id: {key: {"msg_id": int, "last_balls": list, "six_count": int}}}
 SUBSCRIPTIONS = {}
 
 FOUR_ANIMATION = [
@@ -72,8 +73,8 @@ def fetch_match(key):
         return None
 
 # ---------- BALL DETECTION ----------
-def extract_latest_balls(over_string):
-    """Extract balls from over string like '4:0.5.1.1.0.6'"""
+def extract_balls_from_over(over_string):
+    """Extract ['0', '5', '1', '1', '0', '6'] from '4:0.5.1.1.0.6'"""
     if not over_string or ":" not in over_string:
         return []
     try:
@@ -82,27 +83,28 @@ def extract_latest_balls(over_string):
     except:
         return []
 
-def detect_new_events(prev_balls_list, curr_balls_list):
-    """Compare ball lists to find NEW events."""
-    if not curr_balls_list:
+def find_new_events(prev_balls, curr_balls):
+    """Compare two ball lists and find NEW 4/6/W events."""
+    if not curr_balls:
         return []
     
-    # Find balls that weren't in previous list
-    new_count = len(curr_balls_list) - len(prev_balls_list)
+    # How many new balls appeared?
+    new_count = len(curr_balls) - len(prev_balls)
     if new_count <= 0:
         return []
     
-    new_balls = curr_balls_list[-new_count:]
+    # Get only the new balls
+    new_balls = curr_balls[-new_count:]
     events = []
     
     for ball in new_balls:
         ball = ball.strip()
         if ball == "4":
-            events.append("4")
+            events.append(("4", "🎯 FOUR!"))
         elif ball == "6":
-            events.append("6")
-        elif ball.lower() in ("w", "wk", "wd"):
-            events.append("W")
+            events.append(("6", "🚀 SIXER!"))
+        elif ball.lower() in ("w", "wd", "wk"):
+            events.append(("W", "💔 WICKET!"))
     
     return events
 
@@ -166,112 +168,135 @@ def format_score(d, key):
     return text
 
 # ---------- ANIMATIONS ----------
-async def play_animation(bot, chat_id, frames, delay=0.3):
-    """Play animation without blocking."""
+async def play_animation(app, chat_id, frames, delay=0.3):
+    """Play animation in background."""
     try:
-        msg = await bot.send_message(chat_id, frames[0], parse_mode="Markdown")
+        msg = await app.bot.send_message(chat_id, frames[0], parse_mode="Markdown")
         for frame in frames[1:]:
             await asyncio.sleep(delay)
             try:
-                await bot.edit_message_text(
+                await app.bot.edit_message_text(
                     frame, chat_id=chat_id, message_id=msg.message_id,
                     parse_mode="Markdown"
                 )
             except:
                 pass
-        # Delete after animation
+        # Auto-delete after animation
         await asyncio.sleep(2)
-        await bot.delete_message(chat_id, msg.message_id)
+        try:
+            await app.bot.delete_message(chat_id, msg.message_id)
+        except:
+            pass
     except Exception as e:
         log.error(f"Animation error: {e}")
 
-# ---------- AUTO REFRESH JOB ----------
-async def auto_refresh_job(context: ContextTypes.DEFAULT_TYPE):
-    """Runs every 1.5s — updates score & detects events."""
-    job = context.job
-    chat_id = job.chat_id
-    key = job.data
+# ---------- AUTO REFRESH LOOP ----------
+async def auto_refresh_loop(app):
+    """Main loop that refreshes ALL subscriptions every 1.5s"""
+    await asyncio.sleep(2)  # Wait for bot to start
     
-    # Get subscription
-    if chat_id not in SUBSCRIPTIONS or key not in SUBSCRIPTIONS[chat_id]:
-        job.schedule_removal()
-        return
+    while True:
+        try:
+            await asyncio.sleep(1.5)
+            
+            # Copy to avoid "dict changed during iteration"
+            subs_copy = {}
+            for chat_id, matches in SUBSCRIPTIONS.items():
+                subs_copy[chat_id] = dict(matches)
+            
+            # Process each subscription
+            for chat_id, matches in subs_copy.items():
+                for key, sub in matches.items():
+                    try:
+                        await process_subscription(app, chat_id, key, sub)
+                    except Exception as e:
+                        log.error(f"Subscription error {chat_id}:{key}: {e}")
+        
+        except Exception as e:
+            log.error(f"Auto-refresh loop error: {e}")
+
+async def process_subscription(app, chat_id, key, sub):
+    """Process a single subscription."""
+    msg_id = sub.get("msg_id")
+    prev_balls = sub.get("last_balls", [])
     
-    sub = SUBSCRIPTIONS[chat_id][key]
-    msg_id = sub["msg_id"]
-    
-    # Fetch latest data
+    # Fetch fresh data
     data = fetch_match(key)
     if not data:
         return
     
-    # Get current over
+    # Extract current over balls
     current_over = data.get("d", "").split("|")[-1] if data.get("d") else ""
-    prev_balls = sub.get("last_balls", [])
-    curr_balls = extract_latest_balls(current_over)
+    curr_balls = extract_balls_from_over(current_over)
     
-    # Detect new 4/6/W
-    events = detect_new_events(prev_balls, curr_balls)
+    # Detect 4/6/W events
+    events = find_new_events(prev_balls, curr_balls)
     
-    for event in events:
-        if event == "4":
-            log.info(f"🎯 FOUR detected in {key}")
-            asyncio.create_task(play_animation(context.bot, chat_id, FOUR_ANIMATION))
-        elif event == "6":
-            log.info(f"🚀 SIX detected in {key}")
+    for event_type, event_text in events:
+        log.info(f"✅ Event detected: {event_text} in {key}")
+        
+        if event_type == "4":
+            asyncio.create_task(play_animation(app, chat_id, FOUR_ANIMATION, 0.3))
+            asyncio.create_task(app.bot.send_message(chat_id, "🎯 *FOUR!*", parse_mode="Markdown"))
+        
+        elif event_type == "6":
             sub["six_count"] = sub.get("six_count", 0) + 1
-            asyncio.create_task(play_animation(context.bot, chat_id, SIX_ANIMATION))
+            six_total = sub["six_count"]
             
-            # Milestone alert every 6 sixes
-            if sub["six_count"] % 6 == 0:
-                await context.bot.send_message(
+            asyncio.create_task(play_animation(app, chat_id, SIX_ANIMATION, 0.3))
+            asyncio.create_task(app.bot.send_message(chat_id, f"🚀 *SIXER!*\n\n_Total: {six_total} sixes_", parse_mode="Markdown"))
+            
+            # Milestone at every 6 sixes
+            if six_total % 6 == 0:
+                asyncio.create_task(app.bot.send_message(
                     chat_id,
                     f"🎉 *MILESTONE!* 🎉\n\n"
-                    f"💥 *{sub['six_count']} SIXES* in this match!\n"
-                    f"🚀 That's *{sub['six_count'] * 6}* runs from sixes!",
+                    f"💥 *{six_total} SIXES* hit!\n"
+                    f"🚀 *{six_total * 6}* runs from sixes!",
                     parse_mode="Markdown"
-                )
-        elif event == "W":
-            log.info(f"💔 WICKET detected in {key}")
-            asyncio.create_task(play_animation(context.bot, chat_id, WICKET_ANIMATION))
+                ))
+        
+        elif event_type == "W":
+            asyncio.create_task(play_animation(app, chat_id, WICKET_ANIMATION, 0.4))
+            asyncio.create_task(app.bot.send_message(chat_id, "💔 *WICKET!*", parse_mode="Markdown"))
     
-    # Update subscription state
+    # Update state
     sub["last_balls"] = curr_balls
     
-    # Update scoreboard
+    # Update scoreboard message
     text = format_score(data, key)
     kb = [
         [
             InlineKeyboardButton("⏸ Stop Auto", callback_data=f"stop:{key}"),
-            InlineKeyboardButton("🔄 Manual Refresh", callback_data=f"k:{key}")
+            InlineKeyboardButton("🔄 Refresh", callback_data=f"k:{key}")
         ],
         [InlineKeyboardButton("⬅️ Menu", callback_data="back")]
     ]
     
     try:
-        await context.bot.edit_message_text(
+        await app.bot.edit_message_text(
             text, chat_id=chat_id, message_id=msg_id,
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(kb)
         )
     except Exception as e:
         error_str = str(e).lower()
-        if "not modified" not in error_str and "message to edit not found" not in error_str:
-            log.error(f"Edit error: {e}")
         if "message to edit not found" in error_str:
-            job.schedule_removal()
+            # Message deleted, remove subscription
+            if chat_id in SUBSCRIPTIONS and key in SUBSCRIPTIONS[chat_id]:
+                del SUBSCRIPTIONS[chat_id][key]
     
-    # Stop if match over
+    # Stop if match ended
     if data.get("ms") in (4, 5):
-        job.schedule_removal()
         if chat_id in SUBSCRIPTIONS and key in SUBSCRIPTIONS[chat_id]:
+            six_total = SUBSCRIPTIONS[chat_id][key].get("six_count", 0)
             del SUBSCRIPTIONS[chat_id][key]
-        await context.bot.send_message(
-            chat_id,
-            f"🏁 *Match Ended*\n\n"
-            f"Total Sixes: *{sub.get('six_count', 0)}*",
-            parse_mode="Markdown"
-        )
+            await app.bot.send_message(
+                chat_id,
+                f"🏁 *Match Ended*\n\n"
+                f"💥 Total Sixes: *{six_total}*",
+                parse_mode="Markdown"
+            )
 
 # ---------- HANDLERS ----------
 def main_menu():
@@ -287,7 +312,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "🏏 *Live Cricket Score Bot*\n\n"
         "⚡ Real-time updates every 1.5s\n"
         "💥 Animated 4/6/Wicket alerts\n"
-        "🎉 6-sixes milestone notifications\n\n"
+        "🎉 Six-sixes milestone notifications\n\n"
         "👇 Pick a match to start!",
         parse_mode="Markdown", reply_markup=main_menu()
     )
@@ -312,15 +337,15 @@ async def show_match(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text(text, parse_mode="Markdown",
                                    reply_markup=InlineKeyboardMarkup(kb))
     except Exception as e:
-        log.error(f"show_match error: {e}")
+        log.error(f"show_match: {e}")
 
 async def start_auto(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Start 1.5s auto-refresh."""
+    """Start auto-refresh for this match."""
     q = update.callback_query
     key = q.data.split(":", 1)[1]
     chat_id = q.message.chat_id
     
-    await q.answer("✅ Auto-refresh started!")
+    await q.answer("✅ Auto-refresh started! Updates every 1.5s")
     
     # Initialize subscription
     if chat_id not in SUBSCRIPTIONS:
@@ -332,18 +357,24 @@ async def start_auto(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "six_count": 0
     }
     
-    # Create job
-    job_name = f"{chat_id}:{key}"
-    ctx.job_queue.run_repeating(
-        auto_refresh_job,
-        interval=1.5,
-        first=0.1,
-        name=job_name,
-        chat_id=chat_id,
-        data=key
-    )
+    log.info(f"🟢 Auto-refresh STARTED for {key} in chat {chat_id}")
     
-    log.info(f"✅ Auto-refresh started for {key} in {chat_id}")
+    # Send updated message
+    data = fetch_match(key)
+    text = format_score(data, key)
+    kb = [
+        [
+            InlineKeyboardButton("⏸ Stop Auto", callback_data=f"stop:{key}"),
+            InlineKeyboardButton("🔄 Refresh", callback_data=f"k:{key}")
+        ],
+        [InlineKeyboardButton("⬅️ Menu", callback_data="back")]
+    ]
+    
+    try:
+        await q.edit_message_text(text, parse_mode="Markdown",
+                                   reply_markup=InlineKeyboardMarkup(kb))
+    except Exception as e:
+        log.error(f"start_auto edit: {e}")
 
 async def stop_auto(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Stop auto-refresh."""
@@ -351,19 +382,16 @@ async def stop_auto(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     key = q.data.split(":", 1)[1]
     chat_id = q.message.chat_id
     
-    # Remove job
-    jobs = ctx.job_queue.get_jobs_by_name(f"{chat_id}:{key}")
-    for j in jobs:
-        j.schedule_removal()
-    
     # Remove subscription
     if chat_id in SUBSCRIPTIONS and key in SUBSCRIPTIONS[chat_id]:
+        six_count = SUBSCRIPTIONS[chat_id][key].get("six_count", 0)
         del SUBSCRIPTIONS[chat_id][key]
+        await q.answer(f"⏸ Stopped (Sixes: {six_count})")
+    else:
+        await q.answer("⏸ Not running")
     
-    await q.answer("⏸ Stopped")
+    log.info(f"🔴 Auto-refresh STOPPED for {key} in chat {chat_id}")
     await q.edit_message_reply_markup(reply_markup=main_menu())
-    
-    log.info(f"⏸ Auto-refresh stopped for {key} in {chat_id}")
 
 async def back(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -378,11 +406,13 @@ async def help_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await q.answer()
     await q.edit_message_text(
         "➕ *Add a Match*\n\n"
-        "1. Open [crex.com](https://crex.com)\n"
-        "2. Press F12 → Network tab\n"
+        "1. Go to [crex.com](https://crex.com)\n"
+        "2. Open F12 → Network tab\n"
         "3. Filter: `getSV3`\n"
-        "4. Copy `key` from URL\n\n"
-        "`/add <key> <name>`",
+        "4. Copy the `key` value\n\n"
+        "Then: `/add <key> <name>`\n\n"
+        "_Example:_\n"
+        "`/add 118N IND vs AUS`",
         parse_mode="Markdown", disable_web_page_preview=True,
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="back")]])
     )
@@ -391,13 +421,13 @@ async def about(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     await q.edit_message_text(
-        "🤖 *Cricket Live Bot*\n\n"
+        "🤖 *Live Cricket Bot*\n\n"
         "✨ Features:\n"
-        "• ⚡ 1.5s refresh rate\n"
+        "• ⚡ 1.5s auto-refresh\n"
         "• 💥 4/6 animations\n"
         "• 🎉 Six milestones\n"
-        "• 📊 CRR tracking\n"
-        "• 🚀 Hosted on Railway",
+        "• 📊 Live CRR\n"
+        "• 🚀 Railway hosted",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="back")]])
     )
@@ -452,7 +482,7 @@ def main():
     app.add_handler(CommandHandler("score", score_cmd))
     app.add_handler(CommandHandler("list", list_cmd))
     
-    # Buttons
+    # Callbacks
     app.add_handler(CallbackQueryHandler(show_match, pattern="^k:"))
     app.add_handler(CallbackQueryHandler(start_auto, pattern="^start:"))
     app.add_handler(CallbackQueryHandler(stop_auto, pattern="^stop:"))
@@ -460,7 +490,10 @@ def main():
     app.add_handler(CallbackQueryHandler(help_btn, pattern="^help$"))
     app.add_handler(CallbackQueryHandler(about, pattern="^about$"))
     
-    log.info("✅ Bot started")
+    # Start auto-refresh background loop
+    app.post_init = lambda: asyncio.create_task(auto_refresh_loop(app))
+    
+    log.info("✅ Bot started with auto-refresh loop")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
